@@ -1,84 +1,13 @@
 #pragma once
-#include "include/Window.h"
-#include "vendor/vulkan/include/vulkan.h"
-#include "vendor/vulkan/include/vulkan_win32.h"
 #include "include/Core.h"
-
-#ifdef APP_DEBUG
-#define VK_CHECK(x) if(x != VK_SUCCESS) \
-assert(false)
-#else
-#define VK_CHECK(x) x
-#endif
-
-class Buffer
-{
-public:
-	using Byte_t = uint8_t;
-public:
-	Buffer()
-		:
-		m_Data(nullptr),
-		m_Size(0)
-	{}
-
-	~Buffer() 
-	{
-		if (m_Data)
-			delete[] m_Data;
-
-		m_Data = nullptr;
-		m_Size = 0;
-	}
-
-	void Allocate(const std::size_t size)
-	{
-		if (m_Size && m_Size < size)
-			delete[] m_Data;
-
-		m_Size = size;
-		m_Data = new Byte_t[size];
-	}
-
-	void Write(const std::size_t size, const void* data, const std::size_t offset = 0)
-	{
-		assert(m_Size >= size);
-		memcpy(m_Data, data, size);
-	}
-
-	void Clear()
-	{
-		if (m_Data)
-			delete[] m_Data;
-		
-		m_Size = 0;
-	}
-
-	void* Data() const
-	{
-		return m_Data;
-	}
-
-	std::size_t Size() const
-	{
-		return m_Size;
-	}
-private:
-	void* m_Data;
-	std::size_t m_Size;
-};
-
-struct VulkanBuffer
-{
-	VkBuffer Handle = VK_NULL_HANDLE;
-	VkDeviceMemory DeviceMemory = VK_NULL_HANDLE;
-	Buffer CPUData;
-};
+#include "include/Window.h"
+#include "include/VulkanTypes.h"
+#include "include/Image2D.h"
 
 class VulkanApp
 {
 public:
-	VulkanApp(HINSTANCE hInstance);
+	VulkanApp(HINSTANCE hInstance, const bool showConsole);
 	~VulkanApp();
 
 	bool Initialize();
@@ -88,11 +17,14 @@ public:
 	void OnEvent(Event& event);
 public:
 	static bool Close();
+	static VulkanApp* GetInstance();
 private:
+	/* Vulkan Context Initialization */
 	bool CreateInstance();
 	bool CreateSurface();
 	bool CreateLogicalDevice();
 	bool CreateSwapchain();
+	bool LoadAssets();
 
 	bool CreateGraphicsBasedPipeline();
 	bool CreateComputeBasedPipeline();
@@ -101,6 +33,7 @@ private:
 	bool RecordGraphicsCommandBuffers();
 	bool RecordComputeCommandBuffers();
 
+	void UpdateFrameData(const double deltaTime);
 	void DrawFrame();
 	/* Swapchain */
 	void RecreateSwapchain(const uint32_t width, const uint32_t height);
@@ -111,6 +44,35 @@ private:
 	
 	VkCommandBuffer BeginRecordingSingleTimeUseCommands(const bool compute);
 	void EndRecordingSingleTimeUseCommands(VkCommandBuffer commandBuffer, const bool compute);
+	
+	void InsertImageMemoryBarrier(
+		VkCommandBuffer cmdbuffer,
+		VkImage image,
+		VkAccessFlags srcAccessMask,
+		VkAccessFlags dstAccessMask,
+		VkImageLayout oldImageLayout,
+		VkImageLayout newImageLayout,
+		VkPipelineStageFlags srcStageMask,
+		VkPipelineStageFlags dstStageMask,
+		VkImageSubresourceRange subresourceRange);
+
+	void SetImageLayout(
+		VkCommandBuffer cmdbuffer,
+		VkImage image,
+		VkImageLayout oldImageLayout,
+		VkImageLayout newImageLayout,
+		VkPipelineStageFlags srcStageMask,
+		VkPipelineStageFlags dstStageMask);
+private:
+	struct UBO
+	{
+		float AspectRatio;
+		float CenterX;
+		float CenterY;
+		float ZoomScale;
+		int32_t IterationCount;
+		float PADDING[3];
+	};
 private:
 	bool m_Running;
 	Window* m_Window;
@@ -172,6 +134,9 @@ private:
 					assert(false);
 				}
 			}
+
+			assert(false);
+			return false;
 		}
 	private:
 	} m_QueueIndices;
@@ -213,10 +178,13 @@ private:
 	/* Graphics Pipeline */
 	VulkanBuffer m_VertexBuffer;
 	VulkanBuffer m_IndexBuffer;
+	VulkanBuffer m_UBOBuffer;
+
 	VkShaderModule m_VertexShaderModule;
 	VkShaderModule m_FragmentShaderModule;
 
-	VkDescriptorSetLayout m_GraphicsPipelineDescriptorSetLayout;
+	VkDescriptorSetLayout m_GraphicsPipelineUBOBufferDescriptorSetLayout;
+	VkDescriptorSetLayout m_GraphicsPipelineColorPaletteDescriptorSetLayout;
 	VkPipeline m_GraphicsPipeline;
 	VkPipelineLayout m_GraphicsPipelineLayout;
 	std::vector<VkCommandBuffer> m_GraphicsPipelineCommandBuffers;
@@ -224,6 +192,9 @@ private:
 	/* Compute Pipeline */
 	VkShaderModule m_ComputeShaderModule;
 	VkDescriptorSetLayout m_ComputePipelineDescriptorSetLayout;
+	VkDescriptorPool m_GraphicsPipelineDescriptorPool;
+	VkDescriptorSet m_GraphicsPipelineUBOBufferDescriptorSet;
+	VkDescriptorSet m_GraphicsPipelineColorPaletteDescriptorSet;
 
 	VkPipeline m_ComputePipeline;
 	VkPipelineLayout m_ComputePipelineLayout;
@@ -234,10 +205,17 @@ private:
 
 	std::vector<VkFence> m_InFlightFences;;
 	std::vector<VkFence> m_ImagesInFlight;
+
+	/* Assets */
+	Image2D* m_ColorPaletteImage;
+
 	/* Debug */
 #ifdef APP_DEBUG 
 	VkDebugReportCallbackEXT m_DebugReportCallback;
 #endif	
 private:
 	static VulkanApp* s_ApplicationInstance;
+private:
+	friend class Image2D;
+	friend class Input;
 };

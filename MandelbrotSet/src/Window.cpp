@@ -2,6 +2,7 @@
 #include "include/Application.h"
 #include <utility>
 #include <assert.h>
+#include <windowsx.h>
 
 namespace Utilities {
 	constexpr const char* g_WindowClassName = "Vulkan Mandelbrot Renderer";
@@ -16,7 +17,8 @@ Window::Window(const HINSTANCE hInstance, WindowProperties&& windowProperties) n
 	:
 	m_Handle(NULL),
 	m_HInstance(hInstance),
-	m_WindowProperties(std::move(windowProperties))
+	m_WindowProperties(std::move(windowProperties)),
+	m_KeyStates({ 0 })
 {
 	WNDCLASSEXA windowClass;
 	windowClass.hInstance = m_HInstance;
@@ -58,8 +60,11 @@ Window::Window(const HINSTANCE hInstance, WindowProperties&& windowProperties) n
 		assert(false);
 	}
 
-	const uint32_t consoleFlags = m_WindowProperties.ShowCMD ? SW_SHOW : SW_SHOWNOACTIVATE;
-	ShowWindow(m_Handle, consoleFlags);
+	const uint32_t consoleFlags = m_WindowProperties.ShowCMD ? SW_SHOW : SW_HIDE;
+	ShowWindow(GetConsoleWindow(), consoleFlags);
+
+	constexpr uint32_t windowFlags = SW_SHOWMAXIMIZED;
+	ShowWindow(m_Handle, windowFlags);
 	UpdateWindow(m_Handle);
 	SetFocus(m_Handle);
 }
@@ -78,6 +83,11 @@ void Window::PollEvents()
 		TranslateMessage(&message);
 		DispatchMessageA(&message);
 	}
+}
+
+bool Window::KeyPressed(const KeyCode keyCode)
+{
+	return static_cast<bool>(m_KeyStates[static_cast<std::size_t>(keyCode)]);
 }
 
 const std::pair<uint32_t, uint32_t> Window::GetSize() const
@@ -102,7 +112,10 @@ LRESULT CALLBACK Win32ProcedureEventFunctionCallback(HWND hwnd, UINT message, WP
 			CREATESTRUCTA* pCreateStruct = reinterpret_cast<CREATESTRUCTA*>(lParam);
 			Window* _UserData = reinterpret_cast<Window*>(pCreateStruct->lpCreateParams);
 			SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(_UserData));
+			window = reinterpret_cast<Window*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
 
+			POINT point;
+			GetCursorPos(reinterpret_cast<LPPOINT>(&point));
 			return Utilities::EventHandled;
 		}
 
@@ -168,10 +181,40 @@ LRESULT CALLBACK Win32ProcedureEventFunctionCallback(HWND hwnd, UINT message, WP
 		{
 			return DefWindowProcA(hwnd, message, wParam, lParam);
 		}
+
+		case WM_KEYDOWN:
+		{
+			window->m_KeyStates[static_cast<std::size_t>(wParam)] = static_cast<uint8_t>(true);
+			return Utilities::EventHandled;
+		}
+
+		case WM_KEYUP:
+		{
+			window->m_KeyStates[static_cast<std::size_t>(wParam)] = static_cast<uint8_t>(false);
+			return Utilities::EventHandled;
+		}
+
+		case WM_MBUTTONDOWN:
+		{
+			return Utilities::EventHandled;
+		}
+
+		case WM_MBUTTONUP:
+		{
+			return Utilities::EventHandled;
+		}
+
+
+		case WM_MOUSEMOVE:
+		{
+			const DWORD xPosition = GET_X_LPARAM(lParam);
+			const DWORD yPosition = GET_Y_LPARAM(lParam);
+
+			return Utilities::EventHandled;
+		}
 	}
 
 	return DefWindowProcA(hwnd, message, wParam, lParam);
-
 }
 
 LRESULT PASCAL Win32ProcedureErrorFunctionCallback(HWND hwnd, INT errorID)

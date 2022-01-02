@@ -1,13 +1,13 @@
 #pragma once
 #include "include/Core.h"
-#include <Windows.h>
-#include <stdint.h>
-#include <functional>
+#include "include/Input.h"
 
 enum class EEventType
 {
 	None = 0,
 	WindowClose, WindowResize, WindowMinimize,
+	KeyPressed, 
+	MouseButtonPressed,
 };
 
 class Event
@@ -76,12 +76,16 @@ public:
 	~Window();
 	
 	void PollEvents();
+	bool KeyPressed(const KeyCode keyCode);
 	const std::pair<uint32_t, uint32_t> GetSize() const;
+
 	const std::pair<HWND, HINSTANCE> GetInternalState() const;
 private:
 	HWND m_Handle;
 	HINSTANCE m_HInstance;
 	WindowProperties m_WindowProperties;
+
+	std::array<uint8_t, static_cast<std::size_t>(Key::KEYCODES_END)> m_KeyStates;
 private:
 	friend LRESULT CALLBACK Win32ProcedureEventFunctionCallback(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 };

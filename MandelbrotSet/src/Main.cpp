@@ -14,7 +14,7 @@ INT WINAPI wWinMain(
 	PWSTR pCmdLine,
 	INT cmdShow)
 {
-	VulkanApp* application = new VulkanApp(hInstance);
+	VulkanApp* application = new VulkanApp(hInstance, cmdShow);
 	if (application->Initialize())
 	{
 		if (application->Run())

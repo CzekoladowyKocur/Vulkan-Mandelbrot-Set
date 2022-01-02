@@ -39,6 +39,8 @@ project "MandelbrotSet"
 	includedirs
 	{
 		ProjectSourceDirectory,
+		ProjectSourceDirectory .. "vendor/glm",
+		ProjectSourceDirectory .. "vendor/glm/glm",
 	}
 
 	libdirs

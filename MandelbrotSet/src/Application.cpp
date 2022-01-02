@@ -1,7 +1,8 @@
 #pragma once
 #include "include\Application.h"
-#include <array>
-#include <fstream>
+#include "include\Platform.h"
+#include "include\Input.h"
+#include "glm/glm.hpp"
 
 namespace Utilities {
 	#if APP_DEBUG
@@ -37,10 +38,10 @@ namespace Utilities {
 }
 
 VulkanApp* VulkanApp::s_ApplicationInstance = nullptr;
-VulkanApp::VulkanApp(HINSTANCE hInstance)
+VulkanApp::VulkanApp(HINSTANCE hInstance, const bool showConsole)
 	:
 	m_Running(true),
-	m_Window(new Window(hInstance, { 1280, 720, false, std::bind(&VulkanApp::OnEvent, this, std::placeholders::_1) })),
+	m_Window(new Window(hInstance, { 1280, 720, showConsole, std::bind(&VulkanApp::OnEvent, this, std::placeholders::_1) })),
 	/* Vulkan API */
 	m_Instance(VK_NULL_HANDLE),
 	m_Surface(VK_NULL_HANDLE),
@@ -70,11 +71,16 @@ VulkanApp::VulkanApp(HINSTANCE hInstance)
 	m_SwapchainRenderPass(VK_NULL_HANDLE),
 	m_VertexBuffer(),
 	m_IndexBuffer(),
+	m_UBOBuffer(),
 	m_VertexShaderModule(VK_NULL_HANDLE),
 	m_FragmentShaderModule(VK_NULL_HANDLE),
-	m_GraphicsPipelineDescriptorSetLayout(VK_NULL_HANDLE),
+	m_GraphicsPipelineUBOBufferDescriptorSetLayout(VK_NULL_HANDLE),
+	m_GraphicsPipelineColorPaletteDescriptorSetLayout(VK_NULL_HANDLE),
 	m_GraphicsPipeline(VK_NULL_HANDLE),
 	m_GraphicsPipelineLayout(VK_NULL_HANDLE),
+	m_GraphicsPipelineDescriptorPool(VK_NULL_HANDLE),
+	m_GraphicsPipelineUBOBufferDescriptorSet(VK_NULL_HANDLE),
+	m_GraphicsPipelineColorPaletteDescriptorSet(VK_NULL_HANDLE),
 	m_GraphicsPipelineCommandBuffers(),
 	m_ComputeShaderModule(VK_NULL_HANDLE),
 	m_ComputePipelineDescriptorSetLayout(VK_NULL_HANDLE),
@@ -84,17 +90,21 @@ VulkanApp::VulkanApp(HINSTANCE hInstance)
 	m_ImageIndex(0),
 	m_FrameIndex(0),
 	m_InFlightFences(),
-	m_ImagesInFlight()
+	m_ImagesInFlight(),
+	m_ColorPaletteImage(nullptr)
 #ifdef APP_DEBUG
 	,m_DebugReportCallback(VK_NULL_HANDLE)
 #endif
-{}
+{
+	assert(!s_ApplicationInstance);
+	s_ApplicationInstance = this;
+}
 
 VulkanApp::~VulkanApp()
 {
 	m_Running = false;
-	if(m_Window)
-		delete m_Window;
+	delete m_Window;
+
 	/* Vulkan API */
 }
 
@@ -121,6 +131,12 @@ bool VulkanApp::Initialize()
 	if (!CreateSwapchain())
 	{
 		printf("Failed to create vulkan swapchain\n");
+		return false;
+	}
+
+	if (!LoadAssets())
+	{
+		printf("Failed to load assets\n");
 		return false;
 	}
 
@@ -168,10 +184,16 @@ bool VulkanApp::Initialize()
 
 bool VulkanApp::Run()
 {
+	double timer = 0.0;
 	while (m_Running) 
 	{
 		/* Poll events */
 		m_Window->PollEvents();
+		const double deltaTime = Platform::GetAbsoluteTime() - timer;
+		timer = Platform::GetAbsoluteTime();
+
+		//printf("%f\n", deltaTime);
+		UpdateFrameData(deltaTime);
 		DrawFrame();
 	}
 
@@ -181,8 +203,21 @@ bool VulkanApp::Run()
 bool VulkanApp::Shutdown()
 {
 	VK_CHECK(vkDeviceWaitIdle(m_LogicalDevice));
-	
+	delete m_ColorPaletteImage;
 	/* Destroy buffers */
+	if (m_UBOBuffer.Handle)
+	{
+		vkFreeMemory(
+			m_LogicalDevice,
+			m_UBOBuffer.DeviceMemory,
+			nullptr);
+
+		vkDestroyBuffer(
+			m_LogicalDevice,
+			m_UBOBuffer.Handle,
+			nullptr);
+	}
+
 	if (m_VertexBuffer.Handle)
 	{
 		vkFreeMemory(
@@ -222,10 +257,29 @@ bool VulkanApp::Shutdown()
 			m_GraphicsPipelineLayout,
 			nullptr);
 
-	if (m_GraphicsPipelineDescriptorSetLayout)
+	if (m_GraphicsPipelineUBOBufferDescriptorSetLayout)
 		vkDestroyDescriptorSetLayout(
 			m_LogicalDevice,
-			m_GraphicsPipelineDescriptorSetLayout,
+			m_GraphicsPipelineUBOBufferDescriptorSetLayout,
+			nullptr);
+
+	if (m_GraphicsPipelineColorPaletteDescriptorSetLayout)
+		vkDestroyDescriptorSetLayout(
+			m_LogicalDevice,
+			m_GraphicsPipelineColorPaletteDescriptorSetLayout,
+			nullptr);
+
+	if (m_GraphicsPipelineColorPaletteDescriptorSet)
+		vkFreeDescriptorSets(
+			m_LogicalDevice,
+			m_GraphicsPipelineDescriptorPool,
+			1,
+			&m_GraphicsPipelineColorPaletteDescriptorSet);
+			
+	if (m_GraphicsPipelineDescriptorPool)
+		vkDestroyDescriptorPool(
+			m_LogicalDevice,
+			m_GraphicsPipelineDescriptorPool,
 			nullptr);
 
 	CleanupSwapchain();
@@ -295,6 +349,11 @@ bool VulkanApp::Close()
 {
 	s_ApplicationInstance->m_Running = false;
 	return true;
+}
+
+VulkanApp* VulkanApp::GetInstance()
+{
+	return s_ApplicationInstance;
 }
 
 bool VulkanApp::CreateInstance()
@@ -438,7 +497,13 @@ bool VulkanApp::CreateLogicalDevice()
 	}
 
 	if (!m_PhysicalDevice)
+	{
 		m_PhysicalDevice = availablePhysicalDevices[0];
+
+		vkGetPhysicalDeviceProperties(m_PhysicalDevice, &m_PhysicalDeviceProperties);
+		vkGetPhysicalDeviceFeatures(m_PhysicalDevice, &m_PhysicalDeviceFeatures);
+		vkGetPhysicalDeviceMemoryProperties(m_PhysicalDevice, &m_PhysicalDeviceMemoryProperties);
+	}
 
 	uint32_t queueFamilyCount = 0;
 	vkGetPhysicalDeviceQueueFamilyProperties(m_PhysicalDevice, &queueFamilyCount, 0);
@@ -493,7 +558,8 @@ bool VulkanApp::CreateLogicalDevice()
 
 	std::vector<VkDeviceQueueCreateInfo> deviceQueueCreateInfos(indexCount);
 	constexpr float defaultQueuePrority[1] = { 1.0f };
-	constexpr VkPhysicalDeviceFeatures enabledFeautres = {};
+	VkPhysicalDeviceFeatures enabledFeatures = {};
+	enabledFeatures.shaderFloat64 = m_PhysicalDeviceFeatures.shaderFloat64;
 
 	for (uint32_t i = 0; i < indexCount; ++i)
 	{
@@ -511,7 +577,7 @@ bool VulkanApp::CreateLogicalDevice()
 	deviceCreateInfo.ppEnabledExtensionNames = Utilities::RequiredDeviceExtensions.data();
 	deviceCreateInfo.enabledLayerCount = Utilities::RequestedDeviceLayers.size();
 	deviceCreateInfo.ppEnabledLayerNames = Utilities::RequestedDeviceLayers.data();
-	deviceCreateInfo.pEnabledFeatures = &enabledFeautres;
+	deviceCreateInfo.pEnabledFeatures = &enabledFeatures;
 	deviceCreateInfo.pQueueCreateInfos = deviceQueueCreateInfos.data();
 	deviceCreateInfo.queueCreateInfoCount = deviceQueueCreateInfos.size();
 	deviceCreateInfo.flags = 0;
@@ -826,6 +892,14 @@ bool VulkanApp::CreateSwapchain()
 	m_ImagesInFlight.resize(m_ImageCount, VK_NULL_HANDLE);
 	return true;
 }
+
+bool VulkanApp::LoadAssets()
+{
+	m_ColorPaletteImage = new Image2D("assets/images/violetPalette.bmp");
+
+	return true;
+}
+
 bool VulkanApp::CreateGraphicsBasedPipeline()
 {
 	constexpr VkDeviceSize __vbSize = sizeof(float) * 4 * 3;
@@ -840,7 +914,8 @@ bool VulkanApp::CreateGraphicsBasedPipeline()
 
 	const uint32_t fullscreenQuadIndices[6]
 	{
-		0, 1, 2, 2, 3, 0
+		0, 1, 2, 
+		2, 3, 0
 	};
 
 	m_VertexBuffer.CPUData.Allocate(__vbSize);
@@ -898,7 +973,6 @@ bool VulkanApp::CreateGraphicsBasedPipeline()
 		vkMapMemory(m_LogicalDevice, vertexStagingBufferMemory, 0, __vbSize, 0, &data);
 		memcpy(data, m_VertexBuffer.CPUData.Data(), __vbSize);
 		vkUnmapMemory(m_LogicalDevice, vertexStagingBufferMemory);
-		/* Copy CPU memory to staging buffer region */
 		/* Vertex Staging Buffer */
 
 		VkBufferCreateInfo vertexBufferCreateInfo;
@@ -1077,15 +1151,17 @@ bool VulkanApp::CreateGraphicsBasedPipeline()
 			stagingIndexBuffer,
 			nullptr);
 	}
-
-	m_VertexShaderModule = CreateShaderModule("assets/shaders/vertexShader.spv");
+	
+	/* TODO: Add support for doubles */
+	const bool deviceSupportsDoublePrecisionFloats = false; //m_PhysicalDeviceFeatures.shaderFloat64;
+	m_VertexShaderModule = CreateShaderModule(deviceSupportsDoublePrecisionFloats ? "assets/shaders/vertexShaderDoublePrecision.spv" : "assets/shaders/vertexShader.spv");
 	if (!m_VertexShaderModule)
 	{
 		printf("Failed to create vertex shader module\n");
 		return false;
 	}
 
-	m_FragmentShaderModule = CreateShaderModule("assets/shaders/fragmentShader.spv");
+	m_FragmentShaderModule = CreateShaderModule(deviceSupportsDoublePrecisionFloats ? "assets/shaders/fragmentShaderDoublePrecision.spv" : "assets/shaders/fragmentShader.spv");
 	if (!m_FragmentShaderModule)
 	{
 		printf("Failed to create fragment shader module\n");
@@ -1111,7 +1187,6 @@ bool VulkanApp::CreateGraphicsBasedPipeline()
 	fragShaderStageInfo.pNext = nullptr;
 
 	const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{ vertShaderStageInfo, fragShaderStageInfo };
-
 	VkVertexInputBindingDescription vertexInputBindingDescription;
 	vertexInputBindingDescription.binding = 0;
 	vertexInputBindingDescription.stride = sizeof(float) * 3;
@@ -1199,41 +1274,203 @@ bool VulkanApp::CreateGraphicsBasedPipeline()
 	colorBlending.blendConstants[2] = 0.0f;
 	colorBlending.blendConstants[3] = 0.0f;
 
-	VkDescriptorSetLayoutBinding colorPalleteBinding;
-	colorPalleteBinding.binding = 0;
-	colorPalleteBinding.descriptorCount = 1;
-	colorPalleteBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	colorPalleteBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	colorPalleteBinding.pImmutableSamplers = nullptr;
+	{
+		VkDescriptorSetLayoutBinding uboBinding;
+		uboBinding.binding = 0;
+		uboBinding.descriptorCount = 1;
+		uboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		uboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		uboBinding.pImmutableSamplers = nullptr;
 
-	const std::array<VkDescriptorSetLayoutBinding, 1> bindings{ colorPalleteBinding };
-	VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo;
-	descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	descriptorSetLayoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-	descriptorSetLayoutCreateInfo.pBindings = bindings.data();
-	descriptorSetLayoutCreateInfo.flags = 0;
-	descriptorSetLayoutCreateInfo.pNext = nullptr;
+		const std::array<VkDescriptorSetLayoutBinding, 1> bindings{ uboBinding };
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo;
+		descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorSetLayoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+		descriptorSetLayoutCreateInfo.pBindings = bindings.data();
+		descriptorSetLayoutCreateInfo.flags = 0;
+		descriptorSetLayoutCreateInfo.pNext = nullptr;
 
-	VK_CHECK(vkCreateDescriptorSetLayout(
-		m_LogicalDevice,
-		&descriptorSetLayoutCreateInfo,
-		nullptr,
-		&m_GraphicsPipelineDescriptorSetLayout));
+		VK_CHECK(vkCreateDescriptorSetLayout(
+			m_LogicalDevice,
+			&descriptorSetLayoutCreateInfo,
+			nullptr,
+			&m_GraphicsPipelineUBOBufferDescriptorSetLayout));
+	}
 
-	std::array<VkDescriptorSetLayout, 1> descriptorSetLayouts{ m_GraphicsPipelineDescriptorSetLayout };
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	{
+		VkDescriptorSetLayoutBinding colorPalleteBinding;
+		colorPalleteBinding.binding = 0;
+		colorPalleteBinding.descriptorCount = 1;
+		colorPalleteBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		colorPalleteBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		colorPalleteBinding.pImmutableSamplers = nullptr;
+
+		const std::array<VkDescriptorSetLayoutBinding, 1> bindings{ colorPalleteBinding };
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo;
+		descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		descriptorSetLayoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+		descriptorSetLayoutCreateInfo.pBindings = bindings.data();
+		descriptorSetLayoutCreateInfo.flags = 0;
+		descriptorSetLayoutCreateInfo.pNext = nullptr;
+
+		VK_CHECK(vkCreateDescriptorSetLayout(
+			m_LogicalDevice,
+			&descriptorSetLayoutCreateInfo,
+			nullptr,
+			&m_GraphicsPipelineColorPaletteDescriptorSetLayout));
+	}
+
+	std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts{ m_GraphicsPipelineUBOBufferDescriptorSetLayout, m_GraphicsPipelineColorPaletteDescriptorSetLayout };
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo;
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = 0; //static_cast<uint32_t>(descriptorSetLayouts.size());
-	pipelineLayoutInfo.pSetLayouts = nullptr; //descriptorSetLayouts.data(); //&m_GraphicsPipelineDescriptorSetLayout;
+	pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
+	pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data(); 
+	pipelineLayoutInfo.pushConstantRangeCount = 0;
+	pipelineLayoutInfo.pPushConstantRanges = nullptr;
+	pipelineLayoutInfo.flags = 0;
+	pipelineLayoutInfo.pNext = nullptr;
+	
+	VkDescriptorImageInfo imageInfo;
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = m_ColorPaletteImage->GetImageView();
+	imageInfo.sampler = m_ColorPaletteImage->GetImageSampler();
 
-	/* TODO: Add color pallete */
-	//vkUpdateDescriptorSets(
-	//	m_LogicalDevice,
-	//	1,
-	//	nullptr,
-	//	0,
-	//	nullptr
-	//);
+	VkDescriptorPoolSize uboBufferdescriptorPoolSize;
+	uboBufferdescriptorPoolSize.descriptorCount = 1;
+	uboBufferdescriptorPoolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+
+	VkDescriptorPoolSize colorPalleteImagedescriptorPoolSize;
+	colorPalleteImagedescriptorPoolSize.descriptorCount = 1;
+	colorPalleteImagedescriptorPoolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+	const std::array<VkDescriptorPoolSize, 2> descriptorPoolSizes{ uboBufferdescriptorPoolSize, colorPalleteImagedescriptorPoolSize };
+	VkDescriptorPoolCreateInfo descriptorPoolCreateInfo;
+	descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	descriptorPoolCreateInfo.poolSizeCount = static_cast<uint32_t>(descriptorPoolSizes.size());
+	descriptorPoolCreateInfo.pPoolSizes = descriptorPoolSizes.data();
+	descriptorPoolCreateInfo.maxSets = 10;
+	descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	descriptorPoolCreateInfo.pNext = nullptr;
+
+	VK_CHECK(vkCreateDescriptorPool(
+		m_LogicalDevice,
+		&descriptorPoolCreateInfo,
+		nullptr,
+		&m_GraphicsPipelineDescriptorPool));
+
+	VkDescriptorSetAllocateInfo uboBufferDescriptorSetAllocateInfo;
+	uboBufferDescriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	uboBufferDescriptorSetAllocateInfo.descriptorPool = m_GraphicsPipelineDescriptorPool;
+	uboBufferDescriptorSetAllocateInfo.descriptorSetCount = 1;
+	uboBufferDescriptorSetAllocateInfo.pSetLayouts = &m_GraphicsPipelineUBOBufferDescriptorSetLayout;
+	uboBufferDescriptorSetAllocateInfo.pNext = nullptr;
+
+	VK_CHECK(vkAllocateDescriptorSets(
+		m_LogicalDevice,
+		&uboBufferDescriptorSetAllocateInfo,
+		&m_GraphicsPipelineUBOBufferDescriptorSet));
+
+	VkDescriptorSetAllocateInfo colorPalleteImageDescriptorSetAllocateInfo;
+	colorPalleteImageDescriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	colorPalleteImageDescriptorSetAllocateInfo.descriptorPool = m_GraphicsPipelineDescriptorPool;
+	colorPalleteImageDescriptorSetAllocateInfo.descriptorSetCount = 1;
+	colorPalleteImageDescriptorSetAllocateInfo.pSetLayouts = &m_GraphicsPipelineColorPaletteDescriptorSetLayout;
+	colorPalleteImageDescriptorSetAllocateInfo.pNext = nullptr;
+
+	VK_CHECK(vkAllocateDescriptorSets(
+		m_LogicalDevice,
+		&colorPalleteImageDescriptorSetAllocateInfo,
+		&m_GraphicsPipelineColorPaletteDescriptorSet));
+
+	VkBufferCreateInfo uboBufferCreateInfo;
+	uboBufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	uboBufferCreateInfo.size = sizeof(UBO);
+	uboBufferCreateInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+	uboBufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	uboBufferCreateInfo.queueFamilyIndexCount = VK_QUEUE_FAMILY_IGNORED;
+	uboBufferCreateInfo.pQueueFamilyIndices = nullptr;
+	uboBufferCreateInfo.flags = 0;
+	uboBufferCreateInfo.pNext = nullptr;
+
+	VK_CHECK(vkCreateBuffer(
+		m_LogicalDevice,
+		&uboBufferCreateInfo,
+		nullptr,
+		&m_UBOBuffer.Handle));
+
+	VkMemoryRequirements uboBufferMemoryRequirements;
+	vkGetBufferMemoryRequirements(
+		m_LogicalDevice,
+		m_UBOBuffer.Handle,
+		&uboBufferMemoryRequirements);
+
+	VkMemoryAllocateInfo uboBufferMemoryAllocationInfo;
+	uboBufferMemoryAllocationInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	uboBufferMemoryAllocationInfo.allocationSize = uboBufferMemoryRequirements.size;
+	uboBufferMemoryAllocationInfo.memoryTypeIndex = RetrieveMemoryTypeIndex(uboBufferMemoryRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+	uboBufferMemoryAllocationInfo.pNext = nullptr;
+
+	VK_CHECK(vkAllocateMemory(
+		m_LogicalDevice,
+		&uboBufferMemoryAllocationInfo,
+		nullptr,
+		&m_UBOBuffer.DeviceMemory));
+
+	vkBindBufferMemory(
+		m_LogicalDevice,
+		m_UBOBuffer.Handle,
+		m_UBOBuffer.DeviceMemory,
+		0);
+
+	VkWriteDescriptorSet colorPalleteDescriptorSetWrite{};
+	colorPalleteDescriptorSetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	colorPalleteDescriptorSetWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	colorPalleteDescriptorSetWrite.dstBinding = 0;
+	colorPalleteDescriptorSetWrite.dstArrayElement = 0;
+	colorPalleteDescriptorSetWrite.descriptorCount = 1;
+	colorPalleteDescriptorSetWrite.dstSet = m_GraphicsPipelineColorPaletteDescriptorSet;
+	colorPalleteDescriptorSetWrite.pBufferInfo = nullptr;
+	colorPalleteDescriptorSetWrite.pImageInfo = &imageInfo;
+	colorPalleteDescriptorSetWrite.pTexelBufferView = nullptr;
+	colorPalleteDescriptorSetWrite.pNext = nullptr;
+
+	vkUpdateDescriptorSets(
+		m_LogicalDevice,
+		1,
+		&colorPalleteDescriptorSetWrite,
+		0,
+		nullptr);
+
+	glm::mat4 __temp = glm::mat4(1.0f);
+
+	void* data;
+	vkMapMemory(m_LogicalDevice, m_UBOBuffer.DeviceMemory, 0, sizeof(UBO), 0, &data);
+	memcpy(data, &__temp, sizeof(UBO));
+	vkUnmapMemory(m_LogicalDevice, m_UBOBuffer.DeviceMemory);
+
+	VkDescriptorBufferInfo bufferInfo;
+	bufferInfo.buffer = m_UBOBuffer.Handle;
+	bufferInfo.range = sizeof(UBO);
+	bufferInfo.offset = 0;
+
+	VkWriteDescriptorSet uboBufferDescriptorSetWrite{};
+	uboBufferDescriptorSetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	uboBufferDescriptorSetWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	uboBufferDescriptorSetWrite.dstBinding = 0;
+	uboBufferDescriptorSetWrite.dstArrayElement = 0;
+	uboBufferDescriptorSetWrite.descriptorCount = 1;
+	uboBufferDescriptorSetWrite.dstSet = m_GraphicsPipelineUBOBufferDescriptorSet;
+	uboBufferDescriptorSetWrite.pBufferInfo = &bufferInfo;
+	uboBufferDescriptorSetWrite.pImageInfo = nullptr;
+	uboBufferDescriptorSetWrite.pTexelBufferView = nullptr;
+	uboBufferDescriptorSetWrite.pNext = nullptr;
+
+	vkUpdateDescriptorSets(
+		m_LogicalDevice,
+		1,
+		&uboBufferDescriptorSetWrite,
+		0,
+		nullptr);
 
 	if (vkCreatePipelineLayout(
 		m_LogicalDevice, 
@@ -1411,16 +1648,14 @@ bool VulkanApp::RecordGraphicsCommandBuffers()
 {
 	for (uint32_t i = 0; i < m_ImageCount; ++i)
 	{ 
-
 		VkCommandBuffer& commandBuffer = m_GraphicsPipelineCommandBuffers[i];
-		//vkResetCommandBuffer(commandBuffer, VK_COMMAND)
 		VkCommandBufferBeginInfo commandBufferBeginInfo;
 		commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 		commandBufferBeginInfo.pInheritanceInfo = nullptr;
 		commandBufferBeginInfo.flags = 0;
 		commandBufferBeginInfo.pNext = nullptr;
 
-		VkClearValue colorClearValue = { {{0.12f, 0.12f, 0.12f, 1.0f}} };
+		VkClearValue colorClearValue = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
 		VkClearValue clearValues[1]{ colorClearValue };
 
 		VkRenderPassBeginInfo renderPassBeginInfo;
@@ -1485,6 +1720,17 @@ bool VulkanApp::RecordGraphicsCommandBuffers()
 			VK_PIPELINE_BIND_POINT_GRAPHICS,
 			m_GraphicsPipeline);
 
+		const std::array<VkDescriptorSet, 2> descriptorSets{ m_GraphicsPipelineUBOBufferDescriptorSet, m_GraphicsPipelineColorPaletteDescriptorSet };
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			m_GraphicsPipelineLayout,
+			0,
+			static_cast<uint32_t>(descriptorSets.size()),
+			descriptorSets.data(),
+			0,
+			nullptr);
+
 		vkCmdDrawIndexed(
 			commandBuffer,
 			6,
@@ -1504,6 +1750,82 @@ bool VulkanApp::RecordGraphicsCommandBuffers()
 bool VulkanApp::RecordComputeCommandBuffers()
 {
 	return true;
+}
+
+void VulkanApp::UpdateFrameData(const double deltaTime)
+{
+	INTERNALSCOPE float zoomScale = 1.0f; 
+	const auto [windowWidth, windowHeight] = m_Window->GetSize();
+
+	if (windowWidth <= 0 || windowHeight <= 0)
+		return;
+	
+	const float aspectRatio = (float)windowWidth / (float)windowHeight;
+	INTERNALSCOPE UBO ubo = {
+		aspectRatio,
+		0.0f,
+		-0.5f,
+		zoomScale,
+		800
+	};
+	
+	constexpr float moveSpeedFactor = 0.25f;
+	constexpr float zoomSpeedFactor = 1.0f;
+
+	const float zoomSpeed = zoomSpeedFactor;
+	const float moveSpeed = Input::IsKeyPressed(Key::KEY_SHIFT) ? moveSpeedFactor * 2.0f : moveSpeedFactor;
+	/* Move */
+	if (Input::IsKeyPressed(Key::KEY_Z))
+		zoomScale += zoomScale * zoomSpeed * deltaTime;
+
+	if (Input::IsKeyPressed(Key::KEY_X))
+		zoomScale -= zoomScale * zoomSpeed * deltaTime;
+
+	if (Input::IsKeyPressed(Key::KEY_W))
+		ubo.CenterX -= moveSpeed * deltaTime * zoomScale;
+
+	if (Input::IsKeyPressed(Key::KEY_S))
+		ubo.CenterX += moveSpeed * deltaTime * zoomScale;
+
+	if (Input::IsKeyPressed(Key::KEY_A))
+		ubo.CenterY -= moveSpeed * deltaTime * zoomScale;
+
+	if (Input::IsKeyPressed(Key::KEY_D))
+		ubo.CenterY += moveSpeed * deltaTime * zoomScale;
+	
+	if (Input::IsKeyPressed(Key::KEY_UP))
+		ubo.IterationCount += 1;
+
+	if (Input::IsKeyPressed(Key::KEY_DOWN))
+		ubo.IterationCount -= 1;
+
+	/* Cap the zoom scale to avoid black border as we are rendering a quad */
+	zoomScale = zoomScale > 1.0f * aspectRatio ? 1.0f * aspectRatio : fabs(zoomScale);
+	/* Update uniform buffer block */
+	ubo.ZoomScale = zoomScale;
+	ubo.AspectRatio = aspectRatio;
+
+	void* data;
+	vkMapMemory(m_LogicalDevice, m_UBOBuffer.DeviceMemory, 0, sizeof(UBO), 0, &data);
+	memcpy(data, &ubo, sizeof(UBO));
+	vkUnmapMemory(m_LogicalDevice, m_UBOBuffer.DeviceMemory);
+
+	VkDescriptorBufferInfo bufferInfo;
+	bufferInfo.buffer = m_UBOBuffer.Handle;
+	bufferInfo.range = sizeof(UBO);
+	bufferInfo.offset = 0;
+
+	VkWriteDescriptorSet uboBufferDescriptorSetWrite{};
+	uboBufferDescriptorSetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	uboBufferDescriptorSetWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	uboBufferDescriptorSetWrite.dstBinding = 0;
+	uboBufferDescriptorSetWrite.dstArrayElement = 0;
+	uboBufferDescriptorSetWrite.descriptorCount = 1;
+	uboBufferDescriptorSetWrite.dstSet = m_GraphicsPipelineUBOBufferDescriptorSet;
+	uboBufferDescriptorSetWrite.pBufferInfo = &bufferInfo;
+	uboBufferDescriptorSetWrite.pImageInfo = nullptr;
+	uboBufferDescriptorSetWrite.pTexelBufferView = nullptr;
+	uboBufferDescriptorSetWrite.pNext = nullptr;
 }
 
 void VulkanApp::DrawFrame()
@@ -1713,6 +2035,161 @@ void VulkanApp::EndRecordingSingleTimeUseCommands(VkCommandBuffer commandBuffer,
 		nullptr);
 }
 
+void VulkanApp::InsertImageMemoryBarrier(VkCommandBuffer cmdbuffer, VkImage image, VkAccessFlags srcAccessMask, VkAccessFlags dstAccessMask, VkImageLayout oldImageLayout, VkImageLayout newImageLayout, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask, VkImageSubresourceRange subresourceRange)
+{
+	VkImageMemoryBarrier imageMemoryBarrier{};
+	imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	imageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	imageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+	imageMemoryBarrier.srcAccessMask = srcAccessMask;
+	imageMemoryBarrier.dstAccessMask = dstAccessMask;
+	imageMemoryBarrier.oldLayout = oldImageLayout;
+	imageMemoryBarrier.newLayout = newImageLayout;
+	imageMemoryBarrier.image = image;
+	imageMemoryBarrier.subresourceRange = subresourceRange;
+
+	vkCmdPipelineBarrier(
+		cmdbuffer,
+		srcStageMask,
+		dstStageMask,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &imageMemoryBarrier);
+}
+
+void VulkanApp::SetImageLayout(VkCommandBuffer cmdbuffer, VkImage image, VkImageLayout oldImageLayout, VkImageLayout newImageLayout, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask)
+{
+	VkImageSubresourceRange subresourceRange = {};
+	subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	subresourceRange.baseMipLevel = 0;
+	subresourceRange.levelCount = 1;
+	subresourceRange.layerCount = 1;
+
+	VkImageMemoryBarrier imageMemoryBarrier = {};
+	imageMemoryBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	imageMemoryBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	imageMemoryBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	imageMemoryBarrier.oldLayout = oldImageLayout;
+	imageMemoryBarrier.newLayout = newImageLayout;
+	imageMemoryBarrier.image = image;
+	imageMemoryBarrier.subresourceRange = subresourceRange;
+
+	switch (oldImageLayout)
+	{
+		case VK_IMAGE_LAYOUT_UNDEFINED:
+		{
+			imageMemoryBarrier.srcAccessMask = 0;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_PREINITIALIZED:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+		{
+			imageMemoryBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			break;
+		}
+
+		default:
+		{
+			assert(false);
+			break;
+		}
+	}
+
+	switch (newImageLayout)
+	{
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+		{
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+		{
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+		{
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+		{
+			imageMemoryBarrier.dstAccessMask = imageMemoryBarrier.dstAccessMask | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+			break;
+		}
+
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+		{
+			imageMemoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			if (imageMemoryBarrier.srcAccessMask == 0)
+				imageMemoryBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			break;
+		}
+			
+		default:
+		{
+			assert(false);
+			break;
+		}
+	}
+
+	vkCmdPipelineBarrier(
+		cmdbuffer,
+		srcStageMask,
+		dstStageMask,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &imageMemoryBarrier);
+}
+
 VkShaderModule VulkanApp::CreateShaderModule(const std::string_view filepath) const
 {
 	std::ifstream file(filepath.data(), std::ios::ate | std::ios::binary);
@@ -1743,7 +2220,7 @@ VkShaderModule VulkanApp::CreateShaderModule(const std::string_view filepath) co
 		nullptr,
 		&module) != VK_SUCCESS)
 	{
-		printf("Failed to create shader module from given filepath: %s", filepath.data());
+		printf("Failed to create shader module from given filepath: %s\n", filepath.data());
 		return nullptr;
 	}
 
