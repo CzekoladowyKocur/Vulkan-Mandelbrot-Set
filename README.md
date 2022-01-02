@@ -8,7 +8,11 @@ To build the project, navigate to the build directory and run the setup batch fi
 ### Showcase
 ![10kIters](https://github.com/CzekoladowyKocur/Vulkan-Mandelbrot-Set/blob/master/showcase/TenThousandIterations.png)
 ### Input:
-[W] - Move up        [A] - Move left
-[S] - Move down      [D] - Move right
-[X] - Zoom Out       [UP] - Increase iterations
-[Z] - Zoom In        [DOWN] - Decrease iterations
+#### [W] - Move up
+#### [S] - Move down
+#### [A] - Move left
+#### [D] - Move right
+#### [Z] - Zoom In       
+#### [X] - Zoom Out
+#### [UP] - Increase iterations
+#### [DOWN] - Decrease iterations
