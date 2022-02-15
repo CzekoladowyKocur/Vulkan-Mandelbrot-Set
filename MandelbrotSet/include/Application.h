@@ -7,7 +7,14 @@
 class VulkanApp
 {
 public:
-	VulkanApp(HINSTANCE hInstance, const bool showConsole);
+	enum class ERenderMethod
+	{
+		Graphics,
+		Compute,
+		Default = Graphics,
+	};
+public:
+	VulkanApp(const ERenderMethod renderMethod, HINSTANCE hInstance, const bool showConsole);
 	~VulkanApp();
 
 	bool Initialize();
@@ -72,8 +79,18 @@ private:
 		float ZoomScale;
 		int32_t IterationCount;
 		float PADDING[3];
-	};
+	};	
+
+	struct QueueFamilyIndices
+	{
+		int32_t Graphics = -1;
+		int32_t Compute = -1;
+		int32_t Transfer = -1;
+	} m_QueueIndices;
+
+	QueueFamilyIndices GetQueueFamilyIndices(int32_t flags);
 private:
+	ERenderMethod m_RenderMethod;
 	bool m_Running;
 	Window* m_Window;
 	/* Vulkan API */
@@ -89,58 +106,6 @@ private:
 	mutable VkPhysicalDeviceMemoryProperties m_PhysicalDeviceMemoryProperties;
 	VkPhysicalDevice m_PhysicalDevice;
 	
-	struct QueueIndices {
-		enum EQueueFamily {
-			InvalidFamily = -1,
-			GraphicsFamily = 0,
-			ComputeFamily = 1,
-			PresentFamily = 2,
-
-			Begin = GraphicsFamily,
-			End = PresentFamily,
-		};
-
-		int32_t GraphicsQueueFamily = -1;
-		int32_t ComputeQueueFamily = -1;
-		int32_t PresentQueueFamily = -1;
-
-		const bool AreQueueFamiliesShared(const EQueueFamily a, const EQueueFamily b)
-		{
-			return GetQueueFamilyIndex(a) == GetQueueFamilyIndex(b);
-		}
-
-		const uint32_t GetQueueFamilyIndex(const EQueueFamily queueFamily)
-		{
-			switch (queueFamily)
-			{
-				case EQueueFamily::GraphicsFamily:
-				{
-					return GraphicsQueueFamily;
-				}
-
-				case EQueueFamily::ComputeFamily:
-				{
-					return ComputeQueueFamily;
-				}
-
-				case EQueueFamily::PresentFamily:
-				{
-					return PresentFamily;
-				}
-
-				default:
-				{
-					printf("Unknown queue family!\n");
-					assert(false);
-				}
-			}
-
-			assert(false);
-			return false;
-		}
-	private:
-	} m_QueueIndices;
-
 	/* Logical Device */
 	VkDevice m_LogicalDevice;
 	VkQueue m_GraphicsQueue;
@@ -182,24 +147,30 @@ private:
 
 	VkShaderModule m_VertexShaderModule;
 	VkShaderModule m_FragmentShaderModule;
-
-	VkDescriptorSetLayout m_GraphicsPipelineUBOBufferDescriptorSetLayout;
-	VkDescriptorSetLayout m_GraphicsPipelineColorPaletteDescriptorSetLayout;
+	
 	VkPipeline m_GraphicsPipeline;
 	VkPipelineLayout m_GraphicsPipelineLayout;
-	std::vector<VkCommandBuffer> m_GraphicsPipelineCommandBuffers;
 	
-	/* Compute Pipeline */
-	VkShaderModule m_ComputeShaderModule;
-	VkDescriptorSetLayout m_ComputePipelineDescriptorSetLayout;
+	VkDescriptorSetLayout m_GraphicsPipelineUBOBufferDescriptorSetLayout;
+	VkDescriptorSetLayout m_GraphicsPipelineColorPaletteDescriptorSetLayout;
 	VkDescriptorPool m_GraphicsPipelineDescriptorPool;
 	VkDescriptorSet m_GraphicsPipelineUBOBufferDescriptorSet;
 	VkDescriptorSet m_GraphicsPipelineColorPaletteDescriptorSet;
+	std::vector<VkCommandBuffer> m_GraphicsPipelineCommandBuffers;
+	
+	/* Compute Pipeline */
+	VulkanBuffer m_ComputePipelineStorageBuffer;
+
+	VkShaderModule m_ComputeShaderModule;
+	VkDescriptorSetLayout m_ComputePipelineDescriptorSetLayout;
+	VkDescriptorPool m_ComputePipelineDescriptorPool;
+	VkDescriptorSet m_ComputePipelineStorageBufferDescriptorSet;
 
 	VkPipeline m_ComputePipeline;
 	VkPipelineLayout m_ComputePipelineLayout;
-	std::vector<VkCommandBuffer> m_ComputePipelineCommandBuffers;
 
+	VkCommandBuffer m_ComputePipelineCommandBuffer;
+	/* Swapchain synchronization */
 	uint32_t m_ImageIndex;
 	uint32_t m_FrameIndex;
 
